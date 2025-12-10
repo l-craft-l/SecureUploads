@@ -1,0 +1,308 @@
+#!/bin/bash
+
+green='\033[0;32m'
+red='\033[0;31m'
+cyan='\033[0;36m'
+orange='\e[38;5;214m'
+bold='\033[1m'
+reset='\e[0m'
+
+port=443
+upload_path="SecretUploads"
+withtoken=false
+nosec=false
+basic_auth_user=""
+basic_auth_pass=""
+randomup=false
+upload_size=0
+cert=""
+key_cert=""
+
+function show_help() {
+echo -e ${cyan}
+
+cat << 'EOF'
+________                             _____  __       ______            _________
+__  ___/______________  _______________  / / /__________  /___________ ______  /_______
+_____ \_  _ \  ___/  / / /_  ___/  _ \  / / /___  __ \_  /_  __ \  __ `/  __  /__  ___/
+____/ //  __/ /__ / /_/ /_  /   /  __/ /_/ / __  /_/ /  / / /_/ / /_/ // /_/ / _(__  )
+/____/ \___/\___/ \__,_/ /_/    \___/\____/  _  .___//_/  \____/\__,_/ \__,_/  /____/
+                                             /_
+EOF
+echo -e ${reset}
+
+
+instructions=$(cat << EOF
+Usage:
+
+    ${red}sudo${reset} ${cyan}secureuploads${reset} ${green}[OPTION] <VALUE>${reset}
+
+\n\n
+${bold}Options:${reset}
+
+\n\n
+${orange}-h, -help, --help${reset} Show this help menu.
+\n\n
+${orange}-p, --port${reset} ${bold}<number>${reset} Set the port for the server (default: 443).
+\n\n
+${orange}--no-sec${reset} Disable secure mode (HTTPS disabled, runs only on HTTP).
+\n\n
+${orange}--basic-auth${reset} ${bold}<user> <pass>${reset} Enable Basic Authentication. Required to upload files.
+\n\n
+${orange}--token-auth${reset} Enable token authentication. Requests must include header:\n
+"token: <generated_token>"
+\n\n
+${orange}--random-dir${reset} Set a random upload directory (example: ${bold}6602a91ce3cd2fdd${reset})
+\n\n
+${orange}--up-size${reset} ${bold}<size>${reset} Set a maximum file upload size. Prevents oversized uploads.\n
+${orange}Available options:${reset} ${bold}K,k (kilobytes) M,m (megabytes), G,g (gigabytes).${reset}
+\n\n
+${orange}--custom-cert${reset} ${bold}<certificate> <key>${reset} You can set a certificate that you own,\n
+this is can be useful to evade IDS from Self-signed certificates.
+\n\n
+
+${bold}Description:${reset}
+
+\n\n
+SecureUploads creates a temporary, isolated HTTPS file upload endpoint using\n
+${bold}Nginx.${reset} Useful for transferring files securely during a pentest,\n
+bypassing insecure HTTP upload servers or simulating exfiltration scenarios.
+\n\n
+
+${bold}Examples:${reset}
+
+\n\n
+${red}sudo${reset} ${cyan}secureuploads${reset} ${green}--token-auth --random-dir${reset}
+\n
+${red}sudo${reset} ${cyan}secureuploads${reset} ${green}--basic-auth${reset} ${bold}admin password123${reset} ${green}-p${reset} ${bold}8443${reset}
+\n
+${red}sudo${reset} ${cyan}secureuploads${reset} ${green}--no-sec --random-dir${reset}
+\n\n
+${bold}Author: l-craft-l
+\n
+Github -> https://example.com${reset}
+
+EOF
+)
+echo -e $instructions
+}
+
+if systemctl is-active --quiet nginx; then
+        echo -e "${red}[!] nginx is already running... QUITTING${reset}"
+        exit 1
+fi
+
+if [[ $EUID != 0 ]]; then
+   echo -e "${red}[!] This script must be run as root (use sudo)${reset}"
+   exit 1
+fi
+
+log() {
+	echo "$(date '+%Y-%m-%d %H:%M:%S') [SecureUploads] $1" \
+		>> /var/log/secureuploads.log
+}
+
+function ctrl_c() {
+	echo -e "${orange}[~] Shutting down the server...${reset}"
+	log "Server shutdown."
+	sudo systemctl stop nginx
+
+	sudo rm /etc/nginx/sites-available/upload.conf /etc/nginx/sites-enabled/upload.conf
+	sudo rm /etc/nginx/htpasswd 2>/dev/null
+
+	if [ -d "/var/www/uploads/$upload_path" ] && [ "$(ls -A /var/www/uploads/$upload_path 2>/dev/null)" ]; then
+		sudo mv /var/www/uploads/$upload_path .
+		sudo mv /var/log/secure* ./$upload_path
+		sudo chown -R $SUDO_USER:$SUDO_USER ./$upload_path
+	fi
+
+	sudo rm -rf /var/www/uploads /etc/nginx/ssl 2>/dev/null
+
+	exit 0
+}
+
+trap ctrl_c INT
+
+while [[ $# != 0 ]]; do
+	case $1 in
+		-p|--port)
+			port="$2"
+			shift 2
+			;;
+		--no-sec)
+			nosec=true
+			shift
+			;;
+		--basic-auth)
+			if [[ -z "$2" || -z "$3" ]]; then
+				echo -e "${red}[!] User or password field required... QUITTING${reset}"
+				exit 1
+			fi
+			basic_auth_user="$2"
+			basic_auth_pass="$3"
+			shift 3
+			;;
+		--token-auth)
+			withtoken=true
+			shift
+			;;
+		--random-dir)
+			randomup=true
+			shift
+			;;
+		--up-size)
+			upload_size="$2"
+			shift 2
+			;;
+		--custom-cert)
+			if [[ -z "$2" || -z "$3" ]]; then
+				echo -e "${red}[!] Cert or key field required... QUITTING${reset}"
+				exit 1
+			fi
+			cert="$2"
+			key_cert="$3"
+			shift 3
+			;;
+		-h|--help|-help)
+			show_help
+			exit 0
+			;;
+		*)
+			echo -e "${red}[!] Invalid option: $1 ${reset}"
+			exit 1
+			;;
+	esac
+done
+
+if (($port < 1 || $port > 65535)); then
+	echo -e "${red}[!] The port must be between the port 1 to the port 65,535!${reset}"
+	exit 1
+fi
+
+if [[ $nosec == false ]]; then
+	if [[ -z "$cert" ]]; then
+		sudo mkdir -p /etc/nginx/ssl
+
+		sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+			-keyout /etc/nginx/ssl/upload.key \
+			-out /etc/nginx/ssl/upload.crt \
+			-subj "/CN=$(openssl rand -hex 8).local" \
+			> /dev/null 2>&1
+		log "Certificate generated."
+	fi
+        log "Secure mode: ENABLED"
+        proto="https"
+        default_port="443"
+else
+        log "Secure mode: DISABLED"
+        proto="http"
+        default_port="80"
+fi
+
+if [[ -n "$basic_auth_user" ]]; then
+	sudo htpasswd -cb /etc/nginx/htpasswd $basic_auth_user $basic_auth_pass 2>/dev/null
+	log "Basic authentication registered."
+fi
+
+if [[ $withtoken == true ]]; then
+	token=$(openssl rand -hex 16)
+	echo -e "${green}[!] The token is: $token ${reset}"
+	log "Token generated: $token"
+fi
+
+if [[ $randomup == true ]]; then
+	upload_path=$(openssl rand -hex 8)
+	log "Random directory: $upload_path"
+fi
+
+if [[ -z $cert ]]; then
+	cert="/etc/nginx/ssl/upload.crt"
+	key_cert="/etc/nginx/ssl/upload.key"
+fi
+
+script=$(cat << EOF
+	log_format secureuploads '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+				'\$status \$body_bytes_sent "\$http_user_agent" '
+				'File="\$uri"';
+
+server {
+	$(if [[ $nosec == true ]]; then
+		echo "listen $port;"
+	else
+		echo "listen $port ssl;"
+		echo "	ssl_certificate $cert;"
+		echo "	ssl_certificate_key $key_cert;"
+		echo "	ssl_prefer_server_ciphers on;"
+	fi)
+
+	$(if [[ -n "$basic_auth_user" ]]; then
+		echo "auth_basic 'Restricted';"
+		echo "auth_basic_user_file /etc/nginx/htpasswd;"
+	fi)
+
+	client_max_body_size $upload_size;
+
+	access_log /var/log/secureuploads.log secureuploads;
+
+	error_log /var/log/secureuploads_error.log;
+
+	location "/$upload_path/" {
+		root /var/www/uploads;
+
+		limit_except PUT {
+			deny all;
+		}
+
+		dav_methods PUT DELETE;
+
+		$(if [[ $withtoken == true ]]; then
+			echo "if (\$http_token != \"$token\") { return 403; }"
+		fi)
+	}
+}
+EOF
+)
+
+
+if [[ -f /etc/nginx/sites-enabled/default ]]; then
+	sudo rm /etc/nginx/sites-enabled/default
+fi
+
+echo "$script" > /etc/nginx/sites-available/upload.conf
+
+sudo mkdir -p /var/www/uploads/$upload_path
+
+sudo chown -R www-data:www-data /var/www/uploads/$upload_path
+
+sudo ln -sf /etc/nginx/sites-available/upload.conf /etc/nginx/sites-enabled/upload.conf
+
+if [[ $port != $default_port ]]; then
+	log "Specified port: $port"
+	port_str=":$port"
+else
+	port_str=""
+fi
+
+sudo nginx -t > /dev/null 2>&1  || {
+	log "ERROR in the config file."
+	echo -e "${red}[!] unexpected error in the config file... QUITTING${reset}"
+	echo -e "${orange}[-] Config path -> /etc/nginx/sites-available/upload.conf${reset}"
+	exit 1
+}
+
+echo -e "${cyan}[+] The server is up: ${proto}://0.0.0.0${port_str}/${upload_path}${reset}"
+log "Server started on: ${proto}://0.0.0.0${port_str}/${upload_path}"
+
+sudo systemctl restart nginx > /dev/null 2>&1
+
+while read file; do
+	echo -e "${green}[+] The file -->$file<-- was received!${reset}"
+
+	size=$(stat -c %s "/var/www/uploads/$upload_path/$file")
+	creation=$(stat -c %w "/var/www/uploads/$upload_path/$file")
+
+	echo -e "${green}[+] $size Bytes, Creation: $creation ${reset}"
+
+	log "File received: $file (${size} bytes)"
+
+done < <(inotifywait -q -m -e create -e moved_to --format '%f' /var/www/uploads/$upload_path)
