@@ -8,8 +8,11 @@ The script automatically sets up an HTTP/HTTPS server, optional authentication, 
 ---
 
 # Installation
+Copy and execute the following command, and SecureUploads are going to be installed automatically in your system.
 
-
+```bash
+wget https://raw.githubusercontent.com/l-craft-l/SecureUploads/refs/heads/main/install.sh | sudo bash
+```
 
 ---
 
