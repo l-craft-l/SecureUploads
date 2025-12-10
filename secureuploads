@@ -80,7 +80,7 @@ ${red}sudo${reset} ${cyan}secureuploads${reset} ${green}--no-sec --random-dir${r
 \n\n
 ${bold}Author: l-craft-l
 \n
-Github -> https://example.com${reset}
+Github -> https://github.com/l-craft-l/SecureUploads${reset}
 
 EOF
 )
